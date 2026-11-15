@@ -3,15 +3,29 @@
 [![安装](https://img.shields.io/badge/安装-userscript-blue)](https://raw.githubusercontent.com/Phil-Fan/gh-issue-helper/main/gh-issue-helper.user.js)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-一个油猴脚本（Tampermonkey / Violentmonkey），把 GitHub Issue 列表里最常用的两件事变快：
+一个油猴脚本（Tampermonkey / Violentmonkey），把 GitHub Issue 列表改造成「左列表 + 右详情」的工作台：
 
-1. **右键 issue → 直接在鼠标位置弹出原生 Assign 面板**（不用再进详情页、翻侧边栏）
-2. **← / → 在 issue 之间前后跳转**（跟随列表页当前的筛选和排序）
-3. **可选：无限滚动**，列表一直往下加载，不用点分页
+1. **左右分栏**：左侧是 issue 列表，右侧直接看详情，点列表**不再跳转**
+2. **右键 issue → 直接在鼠标位置弹出原生 Assign 面板**（不用再进详情页、翻侧边栏）
+3. **hover 时**，没有 assignee 的 issue 会浮出一个小 `Assign` 入口
+4. **← / → 在 issue 之间前后跳转**（跟随列表页当前的筛选和排序）
+5. **可选：无限滚动**，列表一直往下加载，不用点分页
 
 > 所有写操作都走 GitHub 自己的组件，脚本不调用私有 API、不读取也不保存任何 token。
 
 ## 功能
+
+### 0. 左右分栏：左列表 + 右详情
+
+打开任意 issue 列表页（`https://github.com/<owner>/<repo>/issues`），页面会变成左右两栏：
+
+- 左侧保留 GitHub 原生列表（筛选、排序、勾选全部可用）
+- 右侧是一个**只读预览**，点击左侧任意 issue 就在这里显示标题、正文、评论
+- 地址栏不变，不会离开列表，也不会打断你的浏览位置
+- 预览里的 issue 链接（包括 `#909` 这种交叉引用）继续在右栏打开
+- 右栏顶部有「打开原页 ↗」，需要评论/改标签时跳过去
+
+> 预览是静态快照（GitHub 不允许 iframe 嵌套），所以评论框、按钮不可用；需要写操作请点「打开原页」。
 
 ### 1. 右键直接分配（复用 GitHub 原生下拉菜单）
 
@@ -27,6 +41,14 @@
 - 勾选状态、批量操作栏都是 GitHub 自己的，取消面板后自动恢复原状
 
 想用浏览器原生右键菜单时，按住 **Shift** 或 **Alt** 再右键即可。
+
+### 1.5 hover 显示 Assign 入口
+
+列表里没有 assignee 的 issue，鼠标移上去时行右侧会浮出一个小 `Assign` 胶囊：
+
+- 点击直接弹出原生 `Apply assignees` 面板
+- 已经有 assignee 的行不显示（保持原生头像）
+- 这个按钮是浮层，不写进 GitHub 的 DOM，因此不会影响列表本身的勾选行为
 
 ### 2. ← / → 切换 issue
 
@@ -67,6 +89,7 @@
 
 | 菜单项 | 说明 |
 | --- | --- |
+| ✓ 左右分栏预览（右栏看详情） | 开关左右分栏 |
 | ✓ 键盘 ← / → 切换 issue | 开关键盘导航 |
 | ✓ 无限滚动（不换页） | 开关无限滚动，默认关闭 |
 | 恢复默认设置 | 重置为默认配置 |
@@ -82,6 +105,7 @@
 ## 已知限制
 
 - 只处理 Issues 页，不含 Pull requests
+- 右侧预览是只读静态快照，不能直接评论/改 label/分配（点「打开原页」）
 - 无限滚动加载出来的行需要跳转详情页才能分配（见上文）
 - 没有该仓库写权限时，GitHub 本身不显示 Assign，脚本会提示
 - GitHub 改版 DOM（`data-testid` 命中）可能导致失效，届时更新选择器即可

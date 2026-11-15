@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue Helper
 // @namespace    https://github.com/Phil-Fan/gh-issue-helper
-// @version      0.1.0
-// @description  右键 issue 直接在光标处打开 GitHub 原生 Assign 面板；← / → 切换上一个/下一个 issue；可选无限滚动列表。
+// @version      0.2.0
+// @description  列表页左右分栏预览 issue 详情；右键或 hover 直接调出 GitHub 原生 Assign 面板；← / → 切换 issue；可选无限滚动。
 // @author       Phil-Fan
 // @match        https://github.com/*
 // @grant        GM_registerMenuCommand
@@ -32,7 +32,8 @@
   const PAGE_CACHE_KEY = 'ghih:pageCache';
 
   const DEFAULTS = {
-    keyboardNav: true,   // ← / → 切换 issue
+    keyboardNav: true,    // ← / → 切换 issue
+    splitView: true,      // 列表页左右分栏：左侧列表，右侧详情预览
     endlessScroll: false, // 列表页无限滚动（默认关闭）
     maxPages: 40,         // 无限滚动最多加载的页数
   };
@@ -118,13 +119,46 @@
 
   // ---------------------------------------------------------------- 核心：复用原生 Assign 面板
 
-  /** 批量操作栏里的原生按钮（不是 dialog 里的、不是侧边栏里的） */
-  function findBulkButton(label) {
-    return (
-      [...document.querySelectorAll('button')].find(
-        (b) => isVisible(b) && b.textContent.trim() === label && !b.closest('[role="dialog"]'),
-      ) || null
+  /**
+   * 触发原生 Assign 面板。
+   * 宽度足够时工具栏会直接显示 Assign 按钮；分栏变窄后 GitHub 会把它折叠进「更多」菜单，
+   * 所以两种入口都要处理。
+   */
+  async function triggerAssignPanel() {
+    const direct = [...document.querySelectorAll('button')].find(
+      (b) =>
+        isVisible(b) &&
+        b.textContent.trim() === 'Assign' &&
+        !b.closest('[role="dialog"]') &&
+        !b.classList.contains('ghih-row-assign'),
     );
+    if (direct) {
+      direct.click();
+      return true;
+    }
+
+    const toolbar = document.querySelector('[role="toolbar"][aria-label="Issue actions"]');
+    if (!toolbar) return false;
+
+    const more = [...toolbar.querySelectorAll('button')].find(
+      (b) => isVisible(b) && b.textContent.trim() === '' && b.getAttribute('aria-haspopup') === 'true',
+    );
+    if (!more) return false;
+
+    more.click();
+    const item = await waitFor(
+      () =>
+        [...document.querySelectorAll('[role="menuitem"]')].find(
+          (el) => isVisible(el) && /^assign$/i.test(el.textContent.trim()),
+        ),
+      1500,
+    );
+    if (!item) {
+      document.body.click(); // 关掉溢出菜单
+      return false;
+    }
+    item.click();
+    return true;
   }
 
   /**
@@ -218,17 +252,15 @@
     try {
       if (checkbox && !wasChecked) {
         checkbox.click();
-        await waitFor(() => findBulkButton('Assign'), 1500);
+        await waitFor(() => document.querySelector('[role="toolbar"][aria-label="Issue actions"]'), 1500);
       }
 
-      const assignButton = findBulkButton('Assign');
-      if (!assignButton) {
-        toast('没有找到 Assign 按钮：可能没有该仓库的写权限');
+      const triggered = await triggerAssignPanel();
+      if (!triggered) {
+        toast('没有找到 Assign 入口：可能没有该仓库的写权限');
         if (checkbox && !wasChecked && checkbox.checked) checkbox.click();
         return;
       }
-
-      assignButton.click();
 
       const panel = await waitFor(lastVisibleDialog, 3000);
       if (!panel) {
@@ -622,6 +654,214 @@
     endless.observer.observe(endless.sentinel);
   }
 
+  // ---------------------------------------------------------------- 左右分栏预览
+
+  const split = {
+    pane: null,
+    bar: null,
+    body: null,
+    seq: 0,
+    cache: new Map(),
+    observer: null,
+  };
+
+  function ensureSplitPane() {
+    if (!cfg.splitView) return null;
+    document.body.classList.add('ghih-split');
+
+    if (split.pane && document.contains(split.pane)) return split.pane;
+
+    const pane = document.createElement('div');
+    pane.className = 'ghih-pane';
+
+    const bar = document.createElement('div');
+    bar.className = 'ghih-pane-bar';
+    bar.innerHTML =
+      '<span class="ghih-pane-title">预览</span>' +
+      '<a class="ghih-pane-open" target="_blank" rel="noopener">打开原页 ↗</a>';
+
+    const body = document.createElement('div');
+    body.className = 'ghih-pane-body';
+    body.innerHTML = '<div class="ghih-pane-empty">点击左侧任意 issue，在这里查看详情</div>';
+
+    pane.appendChild(bar);
+    pane.appendChild(body);
+    document.body.appendChild(pane);
+
+    // 预览里的 issue 链接（包括 #909 这种交叉引用）继续在预览里打开
+    pane.addEventListener('click', (event) => {
+      const a = event.target.closest && event.target.closest('a[href]');
+      if (!a) return;
+      const url = new URL(a.href, location.origin);
+      if (url.origin !== location.origin) return;
+      if (!/^\/[^/]+\/[^/]+\/issues\/\d+$/.test(url.pathname)) return;
+      event.preventDefault();
+      showPreview(url.href);
+    });
+
+    split.pane = pane;
+    split.bar = bar;
+    split.body = body;
+    return pane;
+  }
+
+  function teardownSplit() {
+    document.body.classList.remove('ghih-split');
+    if (split.pane) split.pane.remove();
+    if (split.observer) split.observer.disconnect();
+    split.pane = null;
+    split.bar = null;
+    split.body = null;
+    split.observer = null;
+    split.seq += 1;
+    if (hoverButton) hoverButton.hidden = true;
+    document.querySelectorAll('li.ghih-active').forEach((li) => li.classList.remove('ghih-active'));
+  }
+
+  async function showPreview(href, row) {
+    const pane = ensureSplitPane();
+    if (!pane) return;
+
+    const url = new URL(href, location.origin);
+    const seq = ++split.seq;
+
+    document.querySelectorAll('li.ghih-active').forEach((li) => li.classList.remove('ghih-active'));
+    if (row) row.classList.add('ghih-active');
+
+    split.bar.querySelector('.ghih-pane-title').textContent = `#${url.pathname.split('/').pop()} · 只读预览`;
+    split.bar.querySelector('.ghih-pane-open').href = url.href;
+
+    if (split.body.querySelector('[class*="IssueContent"]')) {
+      split.body.classList.add('ghih-loading');
+    } else {
+      split.body.innerHTML = '<div class="ghih-pane-loading">加载中…</div>';
+    }
+
+    let html = split.cache.get(url.pathname);
+    if (!html) {
+      try {
+        const res = await fetch(url.pathname, {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        html = await res.text();
+        split.cache.set(url.pathname, html);
+        if (split.cache.size > 80) split.cache.delete(split.cache.keys().next().value);
+      } catch (err) {
+        console.warn('[gh-issue-helper] 预览加载失败', err);
+        if (seq === split.seq) split.body.innerHTML = '<div class="ghih-pane-empty">加载失败，请点右上角打开原页</div>';
+        return;
+      }
+    }
+
+    if (seq !== split.seq) return;
+
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script, style, link, meta, noscript').forEach((el) => el.remove());
+    const src = doc.querySelector('[class*="IssueContent"]');
+    if (!src) {
+      split.body.innerHTML = '<div class="ghih-pane-empty">无法解析该 issue</div>';
+      return;
+    }
+
+    split.body.innerHTML = '';
+    split.body.appendChild(document.importNode(src, true));
+    split.body.classList.remove('ghih-loading');
+    split.body.scrollTop = 0;
+  }
+
+  /**
+   * 没有 assignee 的行，hover 时在行右侧浮出一个 Assign 入口。
+   *
+   * 注意：不能把这个按钮插到 React 管理的 <li> 里 —— 会破坏 React 的协调，
+   * 导致 checkbox 的点击不再触发选中。所以按钮挂在 body 上，用 fixed 定位跟随 hover 行。
+   */
+  let hoverRow = null;
+  let hoverButton = null;
+  let hoverFrame = 0;
+
+  function hasAssignee(li) {
+    return [...li.querySelectorAll('[class*="metadataAssignees"]')].some((cell) =>
+      cell.querySelector('button[class*="assigneeFilterButton"], img'),
+    );
+  }
+
+  function ensureHoverButton() {
+    if (!cfg.splitView) return null;
+    if (hoverButton && document.contains(hoverButton)) return hoverButton;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghih-row-assign';
+    button.title = 'Assign issue';
+    button.setAttribute('aria-label', 'Assign issue');
+    button.hidden = true;
+    button.innerHTML =
+      '<svg class="octicon" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true">' +
+      '<path d="M10.561 8.073a6.005 6.005 0 0 1 3.432 5.142.75.75 0 1 1-1.498.07 4.5 4.5 0 0 0-8.99 0 .75.75 0 0 1-1.498-.07 6.005 6.005 0 0 1 3.431-5.142 3.999 3.999 0 1 1 5.123 0ZM10.5 5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z"></path>' +
+      '</svg><span>Assign</span>';
+
+    // 防止点击时抢走焦点/触发行的 mousedown 逻辑
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const row = hoverRow || (hoverButton && hoverButton.__row);
+      if (!row) return;
+      const rect = button.getBoundingClientRect();
+      setTimeout(() => openAssignForRow(row, rect.left, rect.bottom + 6), 0);
+    });
+
+    document.body.appendChild(button);
+    hoverButton = button;
+    return button;
+  }
+
+  function hideHoverButton() {
+    hoverRow = null;
+    if (hoverButton) hoverButton.hidden = true;
+  }
+
+  function onPointerOver(event) {
+    if (!cfg.splitView || !listInfo()) return;
+    if (hoverButton && (event.target === hoverButton || hoverButton.contains(event.target))) return;
+
+    const li = event.target.closest && event.target.closest('li');
+    const link = li && li.querySelector('[data-testid="issue-listitem-title-link"]');
+    if (!li || !link) return hideHoverButton();
+    if (hasAssignee(li)) return hideHoverButton();
+
+    const button = ensureHoverButton();
+    if (!button) return;
+
+    hoverRow = li;
+    button.__row = li;
+    cancelAnimationFrame(hoverFrame);
+    hoverFrame = requestAnimationFrame(() => {
+      if (!document.contains(li) || !cfg.splitView) return hideHoverButton();
+      const rect = li.getBoundingClientRect();
+      if (rect.width < 240 || rect.top > window.innerHeight || rect.bottom < 0) return hideHoverButton();
+      button.hidden = false;
+      button.style.left = `${Math.round(rect.right - 95)}px`;
+      button.style.top = `${Math.round(rect.top + rect.height / 2 - 11)}px`;
+    });
+  }
+
+  /** 点击列表项 -> 右侧预览，不跳转 */
+  function onListClick(event) {
+    if (!cfg.splitView) return;
+    if (!listInfo()) return;
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+    const link = event.target.closest && event.target.closest('[data-testid="issue-listitem-title-link"]');
+    if (!link) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    showPreview(link.href, link.closest('li'));
+  }
+
   // ---------------------------------------------------------------- 设置菜单
 
   const menuIds = [];
@@ -657,6 +897,14 @@
       applyRoute();
     });
 
+    add(`${cfg.splitView ? '✓' : '✗'} 左右分栏预览（右栏看详情）`, () => {
+      saveCfg({ splitView: !cfg.splitView });
+      toast(`左右分栏：${cfg.splitView ? '开启' : '关闭'}`);
+      refreshMenu();
+      if (!cfg.splitView) teardownSplit();
+      applyRoute();
+    });
+
     add('恢复默认设置', () => {
       saveCfg({ ...DEFAULTS });
       toast('已恢复默认设置');
@@ -683,12 +931,18 @@
     const detail = detailInfo();
 
     if (list) {
-      // 列表是 React 异步渲染的，等 DOM 出现后再存顺序 / 启动无限滚动
+      // 列表是 React 异步渲染的，等 DOM 出现后再存顺序 / 启动无限滚动 / 挂载分栏
       waitFor(listUl, 4000).then((ul) => {
         if (!ul || seq !== routeSeq) return;
         saveSnapshot();
         if (cfg.endlessScroll) startEndless();
+        if (cfg.splitView) {
+          ensureSplitPane();
+          ensureHoverButton();
+        }
       });
+    } else {
+      teardownSplit();
     }
 
     if (detail && location.hash === '#ghih-assign') {
@@ -722,6 +976,65 @@
         padding: 16px; text-align: center; font-size: 12px;
         color: var(--fgColor-muted, #59636e);
       }
+
+      /* ---- 左右分栏 ---- */
+      body.ghih-split { overflow-x: hidden; --ghih-left: clamp(400px, 40vw, 720px); }
+      body.ghih-split [class*="PageLayoutRoot"] {
+        width: var(--ghih-left) !important; max-width: var(--ghih-left) !important;
+      }
+      body.ghih-split aside[class*="Sidebar__"] { display: none !important; }
+
+      .ghih-pane {
+        position: fixed; top: 0; bottom: 0; left: var(--ghih-left, 40vw); right: 0;
+        display: flex; flex-direction: column;
+        background: var(--bgColor-default, #fff);
+        border-left: 1px solid var(--borderColor-default, #d0d7de);
+        z-index: 2147482000;
+      }
+      .ghih-pane-bar {
+        flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 6px 16px; font-size: 12px; font-weight: 600; line-height: 1.7;
+        color: var(--fgColor-muted, #59636e);
+        background: var(--bgColor-muted, #f6f8fa);
+        border-bottom: 1px solid var(--borderColor-default, #d0d7de);
+      }
+      .ghih-pane-open { font-size: 12px; font-weight: 600; text-decoration: none; color: var(--fgColor-accent, #0969da); }
+      .ghih-pane-open:hover { text-decoration: underline; }
+      .ghih-pane-body {
+        flex: 1; overflow-y: auto; overflow-x: hidden;
+        padding: 8px clamp(16px, 3vw, 36px) 48px;
+        transition: opacity .12s ease;
+      }
+      .ghih-pane-body.ghih-loading { opacity: .45; }
+      .ghih-pane-body [data-testid="issue-viewer-metadata-container"],
+      .ghih-pane-body [data-testid="sticky-sidebar"],
+      .ghih-pane-body [data-testid="comment-composer"],
+      .ghih-pane-body [data-testid="edit-issue-title-button"] { display: none !important; }
+      .ghih-pane-body [class*="contentAndSidebarWrapper"] { display: block !important; }
+      .ghih-pane-body [class*="contentArea"] { width: 100% !important; max-width: 100% !important; }
+      .ghih-pane-empty, .ghih-pane-loading {
+        padding: 48px 20px; text-align: center; font-size: 13px;
+        color: var(--fgColor-muted, #59636e);
+      }
+
+      /* ---- 行内 hover 的 Assign 入口（浮层，不插入 React DOM） ---- */
+      .ghih-row-assign {
+        position: fixed; z-index: 2147482100;
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        height: 22px; padding: 0 9px;
+        font-size: 11px; font-weight: 600; line-height: 1;
+        color: var(--fgColor-muted, #59636e);
+        background: var(--bgColor-default, #fff);
+        border: 1px solid var(--borderColor-default, #d0d7de);
+        border-radius: 999px; cursor: pointer;
+        box-shadow: var(--shadow-resting-small, 0 1px 4px rgba(31, 35, 40, .12));
+        transition: color .12s ease, background-color .12s ease;
+      }
+      .ghih-row-assign[hidden] { display: none; }
+      .ghih-row-assign:hover { color: var(--fgColor-default, #1f2328); background: var(--bgColor-muted, #f6f8fa); }
+      .ghih-pane-body a[href*="/issues/new"] { display: none !important; }
+      .ghih-pane-body [data-testid="issue-header"] button { display: none !important; }
+      li.ghih-active { background: var(--bgColor-accent-muted, rgba(9, 105, 218, .08)); }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -730,6 +1043,10 @@
     injectStyles();
 
     document.addEventListener('contextmenu', onContextMenu, true);
+    document.addEventListener('click', onListClick, true);
+    document.addEventListener('mouseover', onPointerOver, true);
+    document.addEventListener('scroll', hideHoverButton, true);
+    window.addEventListener('resize', hideHoverButton);
     document.addEventListener('keydown', onKeyDown, false);
 
     // 离开列表页前保存顺序（点击 issue 链接时也存一次，Turbo 导航不会触发 unload）
