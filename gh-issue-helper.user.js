@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue Helper
 // @namespace    https://github.com/Phil-Fan/gh-issue-helper
-// @version      0.2.0
-// @description  列表页左右分栏预览 issue 详情；右键或 hover 直接调出 GitHub 原生 Assign 面板；← / → 切换 issue；可选无限滚动。
+// @version      0.3.0
+// @description  列表页左右分栏预览 issue 详情（可拖动）；hover 点一下即可分配（可选 Token）；← / → 切换 issue；可选无限滚动。
 // @author       Phil-Fan
 // @match        https://github.com/*
 // @grant        GM_registerMenuCommand
@@ -34,6 +34,8 @@
   const DEFAULTS = {
     keyboardNav: true,    // ← / → 切换 issue
     splitView: true,      // 列表页左右分栏：左侧列表，右侧详情预览
+    splitWidth: 0,        // 分栏左栏宽度（px），0 = 使用默认比例
+    token: '',            // 可选：带 Issues 写权限的 PAT，用于「点一下就分配」
     endlessScroll: false, // 列表页无限滚动（默认关闭）
     maxPages: 40,         // 无限滚动最多加载的页数
   };
@@ -674,6 +676,52 @@
     const pane = document.createElement('div');
     pane.className = 'ghih-pane';
 
+    // 可拖动的分隔条
+    const resizer = document.createElement('div');
+    resizer.className = 'ghih-resizer';
+    resizer.title = '拖动调整宽度 · 双击复位';
+
+    if (cfg.splitWidth > 0) {
+      document.body.style.setProperty('--ghih-left', `${cfg.splitWidth}px`);
+    }
+
+    const applyDrag = (x) => {
+      const min = 320;
+      const max = Math.max(min, window.innerWidth - 360);
+      const left = Math.max(min, Math.min(x, max));
+      document.body.style.setProperty('--ghih-left', `${left}px`);
+    };
+
+    resizer.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      try {
+        resizer.setPointerCapture(event.pointerId);
+      } catch {
+        /* noop */
+      }
+      resizer.classList.add('ghih-dragging');
+      document.body.classList.add('ghih-resizing');
+    });
+
+    resizer.addEventListener('pointermove', (event) => {
+      if (!resizer.classList.contains('ghih-dragging')) return;
+      applyDrag(event.clientX);
+    });
+
+    const endDrag = () => {
+      if (!resizer.classList.contains('ghih-dragging')) return;
+      resizer.classList.remove('ghih-dragging');
+      document.body.classList.remove('ghih-resizing');
+      if (split.pane) saveCfg({ splitWidth: Math.round(split.pane.getBoundingClientRect().left) });
+    };
+    resizer.addEventListener('pointerup', endDrag);
+    resizer.addEventListener('pointercancel', endDrag);
+
+    resizer.addEventListener('dblclick', () => {
+      document.body.style.removeProperty('--ghih-left');
+      saveCfg({ splitWidth: 0 });
+    });
+
     const bar = document.createElement('div');
     bar.className = 'ghih-pane-bar';
     bar.innerHTML =
@@ -684,6 +732,7 @@
     body.className = 'ghih-pane-body';
     body.innerHTML = '<div class="ghih-pane-empty">点击左侧任意 issue，在这里查看详情</div>';
 
+    pane.appendChild(resizer);
     pane.appendChild(bar);
     pane.appendChild(body);
     document.body.appendChild(pane);
@@ -707,6 +756,8 @@
 
   function teardownSplit() {
     document.body.classList.remove('ghih-split');
+    document.body.classList.remove('ghih-resizing');
+    document.body.style.removeProperty('--ghih-left');
     if (split.pane) split.pane.remove();
     if (split.observer) split.observer.disconnect();
     split.pane = null;
@@ -810,7 +861,12 @@
       const row = hoverRow || (hoverButton && hoverButton.__row);
       if (!row) return;
       const rect = button.getBoundingClientRect();
-      setTimeout(() => openAssignForRow(row, rect.left, rect.bottom + 6), 0);
+      if (cfg.token) {
+        button.hidden = true;
+        openCompactAssign(row, rect);
+      } else {
+        setTimeout(() => openAssignForRow(row, rect.left, rect.bottom + 6), 0);
+      }
     });
 
     document.body.appendChild(button);
@@ -848,18 +904,184 @@
     });
   }
 
-  /** 点击列表项 -> 右侧预览，不跳转 */
+  // ---------------------------------------------------------------- 紧凑分配（可选 Token）
+
+  const amenu = { el: null, row: null, users: [], cache: new Map(), repo: '', number: 0 };
+
+  function closeCompactAssign() {
+    if (amenu.el) amenu.el.remove();
+    amenu.el = null;
+    amenu.row = null;
+  }
+
+  async function loadAssignableUsers(repo) {
+    if (amenu.cache.has(repo)) return amenu.cache.get(repo);
+    const res = await fetch(`https://api.github.com/repos/${repo}/assignees?per_page=100`, {
+      headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const users = await res.json();
+    amenu.cache.set(repo, users);
+    return users;
+  }
+
+  async function assignViaApi(repo, number, login) {
+    const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}/assignees`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ assignees: [login] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function renderAssignUserList(el, filter = '') {
+    const list = el.querySelector('.ghih-amenu-list');
+    const q = filter.trim().toLowerCase();
+    const users = amenu.users.filter(
+      (u) =>
+        !q ||
+        u.login.toLowerCase().includes(q) ||
+        (u.name || '').toLowerCase().includes(q),
+    );
+
+    if (!users.length) {
+      list.innerHTML = '<div class="ghih-amenu-hint">没有匹配的人</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    users.forEach((user) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'ghih-amenu-item';
+      item.dataset.login = user.login;
+
+      const img = document.createElement('img');
+      img.src = user.avatar_url;
+      img.alt = '';
+      img.width = 20;
+      img.height = 20;
+
+      const login = document.createElement('span');
+      login.className = 'ghih-amenu-login';
+      login.textContent = user.login;
+
+      item.appendChild(img);
+      item.appendChild(login);
+
+      if (user.name) {
+        const name = document.createElement('span');
+        name.className = 'ghih-amenu-name';
+        name.textContent = user.name;
+        item.appendChild(name);
+      }
+
+      item.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        item.disabled = true;
+        item.classList.add('ghih-amenu-item--busy');
+        try {
+          await assignViaApi(amenu.repo, amenu.number, user.login);
+          toast(`已把 #${amenu.number} 分配给 ${user.login}`);
+          closeCompactAssign();
+        } catch (err) {
+          console.warn('[gh-issue-helper] 分配失败', err);
+          item.disabled = false;
+          item.classList.remove('ghih-amenu-item--busy');
+          toast(`分配失败（${String(err.message || err)}），检查 Token 权限`, 3000);
+        }
+      });
+
+      list.appendChild(item);
+    });
+  }
+
+  async function openCompactAssign(row, anchorRect) {
+    closeCompactAssign();
+
+    const link = row.querySelector('[data-testid="issue-listitem-title-link"]');
+    const href = link && link.getAttribute('href');
+    if (!href) return;
+
+    const parsed = new URL(href, location.origin);
+    const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+    if (!m) return;
+
+    amenu.repo = `${m[1]}/${m[2]}`;
+    amenu.number = Number(m[3]);
+    amenu.row = row;
+
+    const el = document.createElement('div');
+    el.className = 'ghih-amenu';
+    el.innerHTML =
+      '<div class="ghih-amenu-head">' +
+      '<input class="ghih-amenu-input" type="text" placeholder="Filter assignees" autocomplete="off" spellcheck="false">' +
+      '</div>' +
+      '<div class="ghih-amenu-list"><div class="ghih-amenu-hint">加载中…</div></div>';
+
+    document.body.appendChild(el);
+    amenu.el = el;
+
+    const width = 260;
+    const height = 320;
+    const left = Math.max(8, Math.min(anchorRect.left, window.innerWidth - width - 8));
+    const top =
+      anchorRect.bottom + 6 + height < window.innerHeight
+        ? anchorRect.bottom + 6
+        : Math.max(8, anchorRect.top - height - 6);
+    el.style.left = `${Math.round(left)}px`;
+    el.style.top = `${Math.round(top)}px`;
+
+    const input = el.querySelector('.ghih-amenu-input');
+    input.addEventListener('input', () => renderAssignUserList(el, input.value));
+    input.focus();
+
+    try {
+      amenu.users = await loadAssignableUsers(amenu.repo);
+      renderAssignUserList(el, input.value);
+    } catch (err) {
+      console.warn('[gh-issue-helper] 拉取 assignee 失败', err);
+      el.querySelector('.ghih-amenu-list').innerHTML =
+        '<div class="ghih-amenu-hint">拉取失败，检查 Token 是否有效</div>';
+    }
+  }
+
+  function onDocumentClickCloseMenu(event) {
+    if (!amenu.el) return;
+    if (amenu.el.contains(event.target)) return;
+    closeCompactAssign();
+  }
+
+  function onEscapeCloseMenu(event) {
+    if (event.key !== 'Escape') return;
+    if (amenu.el) closeCompactAssign();
+  }
+
+  /** 点击整行（不只是标题）-> 右侧预览，不跳转 */
   function onListClick(event) {
     if (!cfg.splitView) return;
     if (!listInfo()) return;
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
 
-    const link = event.target.closest && event.target.closest('[data-testid="issue-listitem-title-link"]');
+    // 行内的交互元素保持原样：勾选框、按钮、标签筛选、Assign 胶囊
+    if (event.target.closest && event.target.closest('input, button, [role="button"], [role="checkbox"], summary, .ghih-row-assign')) {
+      return;
+    }
+
+    const li = event.target.closest && event.target.closest('li');
+    if (!li) return;
+    const link = li.querySelector('[data-testid="issue-listitem-title-link"]');
     if (!link) return;
 
     event.preventDefault();
     event.stopPropagation();
-    showPreview(link.href, link.closest('li'));
+    showPreview(link.href, li);
   }
 
   // ---------------------------------------------------------------- 设置菜单
@@ -903,6 +1125,18 @@
       refreshMenu();
       if (!cfg.splitView) teardownSplit();
       applyRoute();
+    });
+
+    add(cfg.token ? '✓ 已设置 Token（点一下即分配）' : '设置 GitHub Token（点一下即分配）', () => {
+      const value = prompt(
+        '粘贴一个有 Issues 读写权限的 GitHub Token（fine-grained: Issues Read and write）。\n留空并确定 = 清除 Token。',
+        '',
+      );
+      if (value === null) return;
+      saveCfg({ token: value.trim() });
+      amenu.cache.clear();
+      toast(cfg.token ? 'Token 已保存，之后点 Assign 胶囊即可直接分配' : 'Token 已清除');
+      refreshMenu();
     });
 
     add('恢复默认设置', () => {
@@ -991,6 +1225,20 @@
         border-left: 1px solid var(--borderColor-default, #d0d7de);
         z-index: 2147482000;
       }
+      .ghih-resizer {
+        position: absolute; left: -4px; top: 0; bottom: 0; width: 9px;
+        z-index: 5; cursor: col-resize; background: transparent;
+        transition: background-color .12s ease;
+      }
+      .ghih-resizer::before {
+        content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 1px;
+        background: var(--borderColor-default, #d0d7de);
+      }
+      .ghih-resizer:hover::before, .ghih-resizer.ghih-dragging::before {
+        background: var(--fgColor-accent, #0969da); width: 2px; left: 3px;
+      }
+      body.ghih-resizing, body.ghih-resizing * { user-select: none !important; cursor: col-resize !important; }
+
       .ghih-pane-bar {
         flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
         padding: 6px 16px; font-size: 12px; font-weight: 600; line-height: 1.7;
@@ -1033,6 +1281,46 @@
       .ghih-row-assign[hidden] { display: none; }
       .ghih-row-assign:hover { color: var(--fgColor-default, #1f2328); background: var(--bgColor-muted, #f6f8fa); }
       .ghih-pane-body a[href*="/issues/new"] { display: none !important; }
+
+      /* ---- 紧凑分配菜单 ---- */
+      .ghih-amenu {
+        position: fixed; z-index: 2147482200; width: 260px; max-height: 320px;
+        display: flex; flex-direction: column; overflow: hidden;
+        background: var(--bgColor-default, #fff);
+        border: 1px solid var(--borderColor-default, #d0d7de);
+        border-radius: 12px;
+        box-shadow: var(--shadow-floating-small, 0 8px 24px rgba(31, 35, 40, .2));
+        font-size: 12px;
+      }
+      .ghih-amenu-head {
+        flex: none; padding: 8px;
+        border-bottom: 1px solid var(--borderColor-default, #d0d7de);
+      }
+      .ghih-amenu-input {
+        width: 100%; height: 28px; padding: 0 8px; box-sizing: border-box;
+        font-size: 12px;
+        color: var(--fgColor-default, #1f2328);
+        background: var(--bgColor-default, #fff);
+        border: 1px solid var(--borderColor-muted, #d1d9e0);
+        border-radius: 6px; outline: none;
+      }
+      .ghih-amenu-input:focus { border-color: var(--fgColor-accent, #0969da); }
+      .ghih-amenu-list { flex: 1; overflow-y: auto; padding: 4px; }
+      .ghih-amenu-item {
+        display: flex; align-items: center; gap: 8px; width: 100%;
+        padding: 5px 8px; border: 0; border-radius: 6px;
+        background: transparent; color: var(--fgColor-default, #1f2328);
+        font-size: 12px; text-align: left; cursor: pointer;
+      }
+      .ghih-amenu-item:hover { background: var(--bgColor-muted, #f6f8fa); }
+      .ghih-amenu-item:disabled { opacity: .5; cursor: default; }
+      .ghih-amenu-item img { border-radius: 50%; flex: none; }
+      .ghih-amenu-login { font-weight: 600; }
+      .ghih-amenu-name { color: var(--fgColor-muted, #59636e); font-size: 11px; }
+      .ghih-amenu-hint {
+        padding: 14px 10px; text-align: center;
+        color: var(--fgColor-muted, #59636e); font-size: 12px;
+      }
       .ghih-pane-body [data-testid="issue-header"] button { display: none !important; }
       li.ghih-active { background: var(--bgColor-accent-muted, rgba(9, 105, 218, .08)); }
     `;
@@ -1045,6 +1333,8 @@
     document.addEventListener('contextmenu', onContextMenu, true);
     document.addEventListener('click', onListClick, true);
     document.addEventListener('mouseover', onPointerOver, true);
+    document.addEventListener('click', onDocumentClickCloseMenu, true);
+    document.addEventListener('keydown', onEscapeCloseMenu, false);
     document.addEventListener('scroll', hideHoverButton, true);
     window.addEventListener('resize', hideHoverButton);
     document.addEventListener('keydown', onKeyDown, false);
