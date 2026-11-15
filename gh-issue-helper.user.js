@@ -9,6 +9,8 @@
 // @grant        GM_unregisterMenuCommand
 // @run-at       document-idle
 // @noframes
+// @downloadURL  https://raw.githubusercontent.com/Phil-Fan/gh-issue-helper/main/gh-issue-helper.user.js
+// @updateURL    https://raw.githubusercontent.com/Phil-Fan/gh-issue-helper/main/gh-issue-helper.user.js
 // ==/UserScript==
 
 /**

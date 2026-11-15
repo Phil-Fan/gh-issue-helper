@@ -1,5 +1,8 @@
 # GitHub Issue Helper
 
+[![安装](https://img.shields.io/badge/安装-userscript-blue)](https://raw.githubusercontent.com/Phil-Fan/gh-issue-helper/main/gh-issue-helper.user.js)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 一个油猴脚本（Tampermonkey / Violentmonkey），把 GitHub Issue 列表里最常用的两件事变快：
 
 1. **右键 issue → 直接在鼠标位置弹出原生 Assign 面板**（不用再进详情页、翻侧边栏）
@@ -42,17 +45,21 @@
 
 ## 安装
 
-### 方式 A：粘贴安装（私有仓库推荐）
+### 方式 A：一键安装（推荐）
 
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 Violentmonkey
-2. 打开扩展的「添加新脚本」
-3. 把 [`gh-issue-helper.user.js`](./gh-issue-helper.user.js) 的内容整段粘贴进去，保存
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge / Firefox / Safari）
+2. 点击下面的安装链接，Tampermonkey 会弹出安装页，点「安装」：
 
-### 方式 B：本地文件导入
+   **<https://raw.githubusercontent.com/Phil-Fan/gh-issue-helper/main/gh-issue-helper.user.js>**
 
-Tampermonkey 的「实用工具 → 导入」选择一个本地 `.user.js` 文件。
+> Chrome 138+ 需要额外开一次开关：`chrome://extensions` → 打开右上角「开发者模式」→ Tampermonkey 的「详情」→ 打开「允许用户脚本」。
 
-> 本仓库是私有的，raw 链接需要 token，所以不提供一键 raw 安装地址。
+### 方式 B：手动粘贴
+
+1. 打开油猴管理面板 → 「添加新脚本」
+2. 把 [`gh-issue-helper.user.js`](./gh-issue-helper.user.js) 的内容整段粘贴进去，保存
+
+安装后打开任意 issue 列表页，脚本会自动生效，控制台会打印 `[gh-issue-helper] 已加载`。
 
 ## 设置
 
