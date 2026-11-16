@@ -59,7 +59,7 @@
 - **评论**：输入后点 `Comment` 或按 `⌘ / Ctrl + Enter`，发布成功后右栏自动刷新
 - **Assign**：弹出同一个紧凑分配下拉
 
-这些操作需要 Token（见下节）。没有 Token 时点击会打开原页，不会静默失败。
+这些操作需要 Token（见下节）。没有 Token 时点击**只会提示，不会跳走、也不会偷偷打开新标签**。
 
 ### 1.6 点一下就分配（可选 Token）
 
@@ -130,7 +130,8 @@
 
 - 只处理 Issues 页，不含 Pull requests
 - 右侧正文是静态快照：代码高亮正常，但正文里的「编辑标题」「Subscribe」等原生按钮不可用
-- 右栏的 Close / 评论 / Assign 需要 Token；Label、Milestone 等仍在原页面操作
+- 右栏的 Close / 评论 / Assign 需要 Token；没配 Token 时点击只提示、不执行
+- Label、Milestone 等仍在原页面操作
 - 紧凑分配依赖 Token；不配 Token 时走原生面板，功能一样但多一步 Save
 - 无限滚动加载出来的行需要跳转详情页才能分配（见上文）
 - 没有该仓库写权限时，GitHub 本身不显示 Assign，脚本会提示

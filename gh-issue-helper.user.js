@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub Issue Helper
 // @namespace    https://github.com/Phil-Fan/gh-issue-helper
-// @version      0.4.0
+// @version      0.4.1
 // @description  列表页左右分栏预览 issue 详情，右栏可直接 Close/评论/分配（可选 Token）；← / → 切换 issue；可选无限滚动。
 // @author       Phil-Fan
 // @match        https://github.com/*
@@ -858,6 +858,13 @@
     return res.json();
   }
 
+  /** 需要 Token 的操作：缺失时只提示，绝不跳转、不打开新标签 */
+  function requireToken(actionLabel) {
+    if (cfg.token) return true;
+    toast(`「${actionLabel}」需要 Token：点油猴图标 → 设置 GitHub Token`, 3500);
+    return false;
+  }
+
   function setupPreviewActions(url) {
     if (!split.pane) return;
     const info = parseIssueUrl(url.href || url);
@@ -876,11 +883,7 @@
     const assignBtn = split.pane.querySelector('.ghih-pane-assign');
     if (assignBtn) {
       assignBtn.onclick = () => {
-        if (!cfg.token) {
-          toast('需要 Token 才能直接分配，已打开原页');
-          window.open(info.href, '_blank', 'noopener');
-          return;
-        }
+        if (!requireToken('Assign')) return;
         const rect = assignBtn.getBoundingClientRect();
         openCompactAssignFor(
           {
@@ -899,11 +902,7 @@
     }
 
     stateBtn.onclick = async () => {
-      if (!cfg.token) {
-        toast('需要 Token 才能直接改状态，已打开原页');
-        window.open(info.href, '_blank', 'noopener');
-        return;
-      }
+      if (!requireToken('Close issue')) return;
       const nextState = stateBtn.dataset.state === 'open' ? 'closed' : 'open';
       const label = nextState === 'closed' ? '关闭' : '重新打开';
       stateBtn.disabled = true;
@@ -943,11 +942,7 @@
         input.focus();
         return;
       }
-      if (!cfg.token) {
-        toast('需要 Token 才能直接回复，已打开原页');
-        window.open(info.href, '_blank', 'noopener');
-        return;
-      }
+      if (!requireToken('Comment')) return;
       submit.disabled = true;
       submit.textContent = '提交中…';
       try {
