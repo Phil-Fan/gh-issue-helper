@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue Helper
 // @namespace    https://github.com/Phil-Fan/gh-issue-helper
-// @version      0.3.0
-// @description  列表页左右分栏预览 issue 详情（可拖动）；hover 点一下即可分配（可选 Token）；← / → 切换 issue；可选无限滚动。
+// @version      0.4.0
+// @description  列表页左右分栏预览 issue 详情，右栏可直接 Close/评论/分配（可选 Token）；← / → 切换 issue；可选无限滚动。
 // @author       Phil-Fan
 // @match        https://github.com/*
 // @grant        GM_registerMenuCommand
@@ -726,7 +726,11 @@
     bar.className = 'ghih-pane-bar';
     bar.innerHTML =
       '<span class="ghih-pane-title">预览</span>' +
-      '<a class="ghih-pane-open" target="_blank" rel="noopener">打开原页 ↗</a>';
+      '<span class="ghih-pane-actions" hidden>' +
+      '<button type="button" class="ghih-pane-assign">Assign</button>' +
+      '<button type="button" class="ghih-state-btn"></button>' +
+      '<a class="ghih-pane-open" target="_blank" rel="noopener">打开原页 ↗</a>' +
+      '</span>';
 
     const body = document.createElement('div');
     body.className = 'ghih-pane-body';
@@ -820,6 +824,154 @@
     split.body.appendChild(document.importNode(src, true));
     split.body.classList.remove('ghih-loading');
     split.body.scrollTop = 0;
+
+    setupPreviewActions(url);
+  }
+
+  // ---------------------------------------------------------------- 预览里的操作（Close / 回复）
+
+  function parseIssueUrl(raw) {
+    const url = new URL(raw, location.origin);
+    const m = url.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+    if (!m) return null;
+    return { repo: `${m[1]}/${m[2]}`, number: Number(m[3]), path: url.pathname, href: url.href };
+  }
+
+  function previewIsOpen() {
+    const el = split.body && split.body.querySelector('[data-testid="header-state"]');
+    const text = (el && el.textContent) || '';
+    if (/closed/i.test(text)) return false;
+    return true;
+  }
+
+  async function apiWrite(path, method, body) {
+    const res = await fetch(`https://api.github.com${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function setupPreviewActions(url) {
+    if (!split.pane) return;
+    const info = parseIssueUrl(url.href || url);
+    const actions = split.pane.querySelector('.ghih-pane-actions');
+    const stateBtn = split.pane.querySelector('.ghih-state-btn');
+    if (!info || !actions || !stateBtn) return;
+
+    actions.hidden = false;
+
+    const isOpen = previewIsOpen();
+    stateBtn.disabled = false;
+    stateBtn.textContent = isOpen ? 'Close issue' : 'Reopen issue';
+    stateBtn.dataset.state = isOpen ? 'open' : 'closed';
+    stateBtn.title = isOpen ? '关闭这个 issue' : '重新打开这个 issue';
+
+    const assignBtn = split.pane.querySelector('.ghih-pane-assign');
+    if (assignBtn) {
+      assignBtn.onclick = () => {
+        if (!cfg.token) {
+          toast('需要 Token 才能直接分配，已打开原页');
+          window.open(info.href, '_blank', 'noopener');
+          return;
+        }
+        const rect = assignBtn.getBoundingClientRect();
+        openCompactAssignFor(
+          {
+            repo: info.repo,
+            number: info.number,
+            path: info.path,
+            href: info.href,
+            onDone: () => {
+              split.cache.delete(info.path);
+              showPreview(info.href);
+            },
+          },
+          rect,
+        );
+      };
+    }
+
+    stateBtn.onclick = async () => {
+      if (!cfg.token) {
+        toast('需要 Token 才能直接改状态，已打开原页');
+        window.open(info.href, '_blank', 'noopener');
+        return;
+      }
+      const nextState = stateBtn.dataset.state === 'open' ? 'closed' : 'open';
+      const label = nextState === 'closed' ? '关闭' : '重新打开';
+      stateBtn.disabled = true;
+      stateBtn.textContent = '处理中…';
+      try {
+        await apiWrite(`/repos/${info.repo}/issues/${info.number}`, 'PATCH', { state: nextState });
+        toast(`已${label} #${info.number}`);
+        split.cache.delete(info.path);
+        showPreview(info.href);
+      } catch (err) {
+        console.warn('[gh-issue-helper] 改状态失败', err);
+        stateBtn.disabled = false;
+        stateBtn.textContent = isOpen ? 'Close issue' : 'Reopen issue';
+        toast(`操作失败（${String(err.message || err)}），检查 Token 权限`, 3000);
+      }
+    };
+
+    // 评论框
+    const oldBox = split.body.querySelector('.ghih-comment');
+    if (oldBox) oldBox.remove();
+
+    const box = document.createElement('div');
+    box.className = 'ghih-comment';
+    box.innerHTML =
+      '<textarea class="ghih-comment-input" placeholder="Leave a comment" rows="3"></textarea>' +
+      '<div class="ghih-comment-foot">' +
+      '<span class="ghih-comment-hint">⌘ / Ctrl + Enter 提交</span>' +
+      '<button type="button" class="ghih-comment-submit">Comment</button>' +
+      '</div>';
+
+    const input = box.querySelector('.ghih-comment-input');
+    const submit = box.querySelector('.ghih-comment-submit');
+
+    const doSubmit = async () => {
+      const body = input.value.trim();
+      if (!body) {
+        input.focus();
+        return;
+      }
+      if (!cfg.token) {
+        toast('需要 Token 才能直接回复，已打开原页');
+        window.open(info.href, '_blank', 'noopener');
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = '提交中…';
+      try {
+        await apiWrite(`/repos/${info.repo}/issues/${info.number}/comments`, 'POST', { body });
+        toast('评论已发布');
+        split.cache.delete(info.path);
+        showPreview(info.href);
+      } catch (err) {
+        console.warn('[gh-issue-helper] 评论失败', err);
+        submit.disabled = false;
+        submit.textContent = 'Comment';
+        toast(`评论失败（${String(err.message || err)}），检查 Token 权限`, 3000);
+      }
+    };
+
+    submit.addEventListener('click', doSubmit);
+    input.addEventListener('keydown', (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault();
+        doSubmit();
+      }
+    });
+
+    split.body.appendChild(box);
   }
 
   /**
@@ -989,7 +1141,9 @@
         try {
           await assignViaApi(amenu.repo, amenu.number, user.login);
           toast(`已把 #${amenu.number} 分配给 ${user.login}`);
+          const done = amenu.onDone;
           closeCompactAssign();
+          if (done) done();
         } catch (err) {
           console.warn('[gh-issue-helper] 分配失败', err);
           item.disabled = false;
@@ -1002,9 +1156,7 @@
     });
   }
 
-  async function openCompactAssign(row, anchorRect) {
-    closeCompactAssign();
-
+  function openCompactAssign(row, anchorRect) {
     const link = row.querySelector('[data-testid="issue-listitem-title-link"]');
     const href = link && link.getAttribute('href');
     if (!href) return;
@@ -1013,9 +1165,18 @@
     const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
     if (!m) return;
 
-    amenu.repo = `${m[1]}/${m[2]}`;
-    amenu.number = Number(m[3]);
-    amenu.row = row;
+    openCompactAssignFor(
+      { repo: `${m[1]}/${m[2]}`, number: Number(m[3]), path: parsed.pathname, href: parsed.href },
+      anchorRect,
+    );
+  }
+
+  async function openCompactAssignFor(target, anchorRect) {
+    closeCompactAssign();
+
+    amenu.repo = target.repo;
+    amenu.number = target.number;
+    amenu.onDone = target.onDone || null;
 
     const el = document.createElement('div');
     el.className = 'ghih-amenu';
@@ -1246,6 +1407,26 @@
         background: var(--bgColor-muted, #f6f8fa);
         border-bottom: 1px solid var(--borderColor-default, #d0d7de);
       }
+      .ghih-pane-actions { display: inline-flex; align-items: center; gap: 10px; }
+      .ghih-pane-assign {
+        display: inline-flex; align-items: center; height: 24px; padding: 0 10px;
+        font-size: 12px; font-weight: 600; line-height: 1;
+        color: var(--fgColor-default, #1f2328);
+        background: var(--button-default-bgColor-rest, #f6f8fa);
+        border: 1px solid var(--borderColor-default, #d0d7de);
+        border-radius: 6px; cursor: pointer;
+      }
+      .ghih-pane-assign:hover { background: var(--button-default-bgColor-hover, #eef1f4); }
+      .ghih-state-btn {
+        display: inline-flex; align-items: center; height: 24px; padding: 0 10px;
+        font-size: 12px; font-weight: 600; line-height: 1;
+        color: var(--fgColor-onEmphasis, #fff);
+        background: var(--button-primary-bgColor-rest, #1f883d);
+        border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+      }
+      .ghih-state-btn[data-state="closed"] { background: var(--button-danger-bgColor-rest, #cf222e); }
+      .ghih-state-btn:hover { filter: brightness(1.08); }
+      .ghih-state-btn:disabled { opacity: .6; cursor: default; }
       .ghih-pane-open { font-size: 12px; font-weight: 600; text-decoration: none; color: var(--fgColor-accent, #0969da); }
       .ghih-pane-open:hover { text-decoration: underline; }
       .ghih-pane-body {
@@ -1260,6 +1441,36 @@
       .ghih-pane-body [data-testid="edit-issue-title-button"] { display: none !important; }
       .ghih-pane-body [class*="contentAndSidebarWrapper"] { display: block !important; }
       .ghih-pane-body [class*="contentArea"] { width: 100% !important; max-width: 100% !important; }
+      .ghih-comment {
+        margin: 24px 0 8px; overflow: hidden;
+        border: 1px solid var(--borderColor-default, #d0d7de);
+        border-radius: 8px;
+        background: var(--bgColor-default, #fff);
+      }
+      .ghih-comment-input {
+        display: block; width: 100%; min-height: 84px; box-sizing: border-box;
+        padding: 10px 12px; border: 0; outline: none; resize: vertical;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", sans-serif;
+        color: var(--fgColor-default, #1f2328);
+        background: transparent;
+      }
+      .ghih-comment-foot {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        padding: 8px 12px;
+        background: var(--bgColor-muted, #f6f8fa);
+        border-top: 1px solid var(--borderColor-default, #d0d7de);
+      }
+      .ghih-comment-hint { font-size: 11px; color: var(--fgColor-muted, #59636e); }
+      .ghih-comment-submit {
+        height: 28px; padding: 0 14px;
+        font-size: 12px; font-weight: 600; line-height: 1;
+        color: var(--fgColor-onEmphasis, #fff);
+        background: var(--button-primary-bgColor-rest, #1f883d);
+        border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+      }
+      .ghih-comment-submit:hover { filter: brightness(1.08); }
+      .ghih-comment-submit:disabled { opacity: .6; cursor: default; }
+
       .ghih-pane-empty, .ghih-pane-loading {
         padding: 48px 20px; text-align: center; font-size: 13px;
         color: var(--fgColor-muted, #59636e);
